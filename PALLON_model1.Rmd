@@ -1,0 +1,167 @@
+---
+title: "Christine Pallon - Model 1"
+output: pdf_document
+date: "2022-12-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+library(dplyr)     
+library(ggplot2)    
+library(rsample)    
+library(recipes)   
+library(dslabs)   
+library(purrr)     
+library(tidyverse)  
+library(caret)      
+library(pROC)
+```
+
+## Loading and pre-processing data
+
+This first model uses kNN, an **ensemble classification model**, using the radiomics dataset. First, we need to load and pre-process the dataset.
+
+```{r}
+## LOADING DATA ##
+
+radiomics <- read.csv("radiomics_completedata.csv")
+
+
+## CHECKING FOR NULL VALUES AND PREPARING DATA ##
+
+is.null(radiomics)
+radiomics <- radiomics %>% select(-Institution, -Failure)
+radiomics$Failure.binary <- as.factor(radiomics$Failure.binary)
+radiomics$Failure.binary
+```
+
+Then, we change the Failure.binary levels from 0 and 1 to No and Yes to prevent an error regarding class levels when running kNN.
+
+```{r}
+levels(radiomics$Failure.binary)=c("No","Yes")
+
+# Double-checking response variable after changing levels ##
+
+head(radiomics$Failure.binary)
+```
+
+
+## Correlation 
+
+Then, we get the correlation of the whole dataset except the categorical variables. The output of this has been hidden due to its length.
+
+```{r echo=T, results='hide'}
+radiomics_non_categorical <- radiomics %>% select(-Failure.binary)
+radiomics_correlation <- as.data.frame(cor(radiomics_non_categorical)) 
+radiomics_correlation
+```
+
+##  Setting up the kNN model 
+
+Now, it's time to split the data into an 80/20 training/testing split, prepare blueprints, create a resampling method, and create a hyperparameter grid search. 
+
+```{r}
+radiomics <- radiomics %>% mutate_if(is.ordered, factor, ordered = FALSE)
+
+set.seed(123)
+radiomics_split <- initial_split(radiomics, prop = .8, strata = "Failure.binary")
+radiomics_train <- training(radiomics_split)
+radiomics_test  <- testing(radiomics_split)
+
+blueprint_1 <- recipe(Failure.binary ~ ., data = radiomics_train) %>%
+  step_nzv(all_nominal()) %>%
+  step_integer(Entropy_cooc.W.ADC) %>%
+  step_integer(GLNU_align.H.PET) %>%
+  step_integer(Min_hist.PET) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
+
+blueprint_2 <- recipe(Failure.binary ~ ., data = radiomics_test) %>%
+  step_nzv(all_nominal()) %>%
+  step_integer(Entropy_cooc.W.ADC) %>%
+  step_integer(GLNU_align.H.PET) %>%
+  step_integer(Min_hist.PET) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
+
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 10, 
+  repeats = 5,
+  classProbs = TRUE,                 
+  summaryFunction = twoClassSummary
+)
+
+
+hyper_grid <- expand.grid(
+  k = floor(seq(1, nrow(radiomics_train)/3, length.out = 20))
+)
+```
+
+##  Fitting the model using the training data
+
+Now it's time to fit our kNN model in the training phase. 
+
+```{r echo=T, results='hide'}
+knn_grid_train <- train(
+  blueprint_1, 
+  data = radiomics_train, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "ROC"
+)
+```
+
+## Printing Top 20 important features during the training phase
+
+Using varImp() to print the Top 20 most importan features during the training phase.
+
+```{r}
+vi <- varImp(knn_grid_train)
+print(vi)
+```
+
+##  Printing the AUC values during the training phase
+
+Finally, before moving onto the testing phase, we print the AUC values.
+
+```{r, message = FALSE}
+pred_knn_train <- predict(knn_grid_train, radiomics_train, type = "prob")
+
+roc(radiomics_train$Failure.binary ~ pred_knn_train[,2], plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+```
+
+##  Fitting the model using the testing data
+
+Now, we fit our kNN model using the testing data.
+
+```{r echo=T, warning = FALSE}
+knn_grid_test <- train(
+  blueprint_2, 
+  data = radiomics_test, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "ROC"
+)
+```
+
+## Printing the AUC values during the training data
+
+Finally, we print the AUC values during the training phase. 
+
+```{r, message = FALSE}
+pred_knn_test <- predict(knn_grid_test, radiomics_test, type = "prob")
+
+roc(radiomics_test$Failure.binary ~ pred_knn_test[,2], plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+```
+
